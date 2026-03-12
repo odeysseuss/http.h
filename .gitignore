@@ -1,0 +1,6 @@
+build/
+.cache/
+stat.txt
+perf.data.old
+perf.data
+tcp.svg
