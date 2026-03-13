@@ -1,6 +1,12 @@
-#define POOL_IMPLEMENTATION
+#define HTTP_IMPLEMENTATION
 #define TCP_IMPLEMENTATION
+#define POOL_IMPLEMENTATION
+#define STR_IMPLEMENTATION
+#define HASHMAP_IMPLEMENTATION
+#include "http.h"
 #include "tcp.h"
+#include "hashmap.h"
+#include <stdio.h>
 
 #define PORT "8000"
 
@@ -28,11 +34,19 @@ void readAndWrite(Conn *conn) {
         } else if (bytes_recv == -1) {
             goto clean;
         }
+        buf[bytes_recv] = '\0';
 
-        ssize_t bytes_send = tcpSend(conn->fd, buf, bytes_recv);
-        if (bytes_send <= 0) {
-            goto clean;
-        }
+        printf("%s\n", buf);
+        String str = strNewLen(buf, bytes_recv);
+
+        HttpConn *ser = httpInit(conn);
+        HttpRequest *req = httpParseReq(ser, str);
+        printf("reqline: %s\n", req->req_line);
+        hashmapPrint(req->headers);
+        printf("body: [%s]\n", req->body);
+        httpFree(ser);
+
+        strFree(str);
     }
 
     return;

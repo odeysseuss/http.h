@@ -26,36 +26,39 @@ typedef struct {
 } Node;
 
 typedef struct {
-    // void *(*alloc)(size_t n);
-    // void (*free)(void *node);
     size_t (*keySize)(const void *key);
-    int (*cmp)(const void *a, const void *b); // returns 0 if equal
+    void (*keyFree)(void *key);
+    void (*valFree)(void *val);
+    int (*keyCmp)(const void *a, const void *b); // returns 0 if equal
     void (*print)(const void *key, const void *val);
     size_t size;
     size_t capacity;
     float load_factor;
     size_t threshold;
-    Node **items;
     Node tombstone;
+    Node **items;
 } HashMap;
 
 /// Helper for hashmapNew
 typedef struct {
-    // void *(*alloc)(size_t n);
-    // void (*free)(void *node);
     size_t (*keySize)(const void *key);
-    int (*cmp)(const void *a, const void *b); // returns 0 if equal
+    void (*keyFree)(void *key);
+    void (*valFree)(void *val);
+    int (*keyCmp)(const void *a, const void *b); // returns 0 if equal
     void (*print)(const void *key, const void *val);
     size_t capacity;
     float load_factor;
 } HashMapArgs;
 
-/// Has to provide HashMapArgs with capacity, nodeKeySize and nodeCmp initializes
+/// Has to provide HashMapArgs with capacity, keySize and keyCmp initializes
+/// If keyFree and keyVal is provided than the lifetime of key and value will be
+/// maintained by the hashmap
 /// If load_factor is not provided than it falls back to 7.5
 /// Free it with hashmapFree
 HashMap *hashmapNew(HashMapArgs *args);
 /// Only assigns the pointer. If there is an heap allocated key or value caller
-/// is responsible for the lifetime of that memory
+/// is responsible for the lifetime of that memory by freeing it explicitly or by
+/// providing keyFree and valFree
 void hashmapSet(HashMap *map, const void *key, const void *val);
 void *hashmapGet(const HashMap *map, const void *key);
 /// If you freed the key or value of any heap allocated object be sure to call
@@ -213,7 +216,13 @@ static inline Node *nodeNew_(const void *key, const void *val) {
     return node;
 }
 
-static inline void nodeFree_(Node *node) {
+static inline void nodeFree_(HashMap *map, Node *node) {
+    if (map->keyFree) {
+        map->keyFree(node->key);
+    }
+    if (map->valFree) {
+        map->valFree(node->val);
+    }
     free_(node);
 }
 
@@ -249,7 +258,7 @@ static void hashmapResize_(HashMap *map) {
 }
 
 HashMap *hashmapNew(HashMapArgs *args) {
-    if (!args || !args->capacity || !args->keySize || !args->cmp) {
+    if (!args || !args->capacity || !args->keySize || !args->keyCmp) {
         return NULL;
     }
 
@@ -263,10 +272,10 @@ HashMap *hashmapNew(HashMapArgs *args) {
     }
     map->threshold = (size_t)(map->capacity * map->load_factor);
     map->items = calloc_(args->capacity, sizeof(Node *));
-    // map->nodeAlloc = args->nodeAlloc;
-    // map->nodeFree = args->nodeFree;
-    map->cmp = args->cmp;
     map->keySize = args->keySize;
+    map->keyFree = args->keyFree;
+    map->valFree = args->valFree;
+    map->keyCmp = args->keyCmp;
     map->print = args->print;
     map->tombstone.key = NULL;
     map->tombstone.val = NULL;
@@ -293,7 +302,7 @@ void hashmapSet(HashMap *map, const void *key, const void *val) {
         }
 
         if (map->items[index] != &map->tombstone &&
-            map->cmp(map->items[index]->key, key) == 0) {
+            map->keyCmp(map->items[index]->key, key) == 0) {
             map->items[index]->val = (void *)val;
             return;
         }
@@ -323,7 +332,7 @@ void *hashmapGet(const HashMap *map, const void *key) {
             return NULL;
         }
 
-        if (node != &map->tombstone && map->cmp(node->key, key) == 0) {
+        if (node != &map->tombstone && map->keyCmp(node->key, key) == 0) {
             return node->val;
         }
 
@@ -346,8 +355,8 @@ void hashmapDel(HashMap *map, const void *key) {
             return;
         }
 
-        if (node != &map->tombstone && map->cmp(node->key, key) == 0) {
-            nodeFree_(node);
+        if (node != &map->tombstone && map->keyCmp(node->key, key) == 0) {
+            nodeFree_(map, node);
             map->items[index] = &map->tombstone;
             map->size--;
             return;
@@ -365,7 +374,7 @@ void hashmapFree(HashMap *map) {
     for (size_t i = 0; i < map->capacity; i++) {
         Node *node = map->items[i];
         if (node && node != &map->tombstone) {
-            nodeFree_(node);
+            nodeFree_(map, node);
         }
     }
 
