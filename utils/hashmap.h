@@ -27,9 +27,9 @@ typedef struct {
 
 typedef struct {
     size_t (*keySize)(const void *key);
+    int (*keyCmp)(const void *a, const void *b); // returns 0 if equal
     void (*keyFree)(void *key);
     void (*valFree)(void *val);
-    int (*keyCmp)(const void *a, const void *b); // returns 0 if equal
     void (*print)(const void *key, const void *val);
     size_t size;
     size_t capacity;
@@ -42,9 +42,9 @@ typedef struct {
 /// Helper for hashmapNew
 typedef struct {
     size_t (*keySize)(const void *key);
+    int (*keyCmp)(const void *a, const void *b); // returns 0 if equal
     void (*keyFree)(void *key);
     void (*valFree)(void *val);
-    int (*keyCmp)(const void *a, const void *b); // returns 0 if equal
     void (*print)(const void *key, const void *val);
     size_t capacity;
     float load_factor;
@@ -59,11 +59,10 @@ HashMap *hashmapNew(HashMapArgs *args);
 /// Only assigns the pointer. If there is an heap allocated key or value caller
 /// is responsible for the lifetime of that memory by freeing it explicitly or by
 /// providing keyFree and valFree
-void hashmapSet(HashMap *map, const void *key, const void *val);
+void hashmapSet(HashMap *map, void *key, void *val);
 void *hashmapGet(const HashMap *map, const void *key);
 /// If you freed the key or value of any heap allocated object be sure to call
 /// hashmapDel as the the lifetime of key, val and node can be completely different.
-/// Or, call hashmapSet with the same key with a different val before using it.
 /// Otherwise, it will hold dangling pointers.
 void hashmapDel(HashMap *map, const void *key);
 void hashmapFree(HashMap *map);
@@ -100,7 +99,7 @@ static inline uint64_t rotl64_(uint64_t x, int r) {
     return (x << r) | (x >> (64 - r));
 }
 
-static uint64_t xxh3(const void *data, size_t len, uint64_t seed) {
+static uint64_t xxh3_(const void *data, size_t len, uint64_t seed) {
     const uint8_t *p = (const uint8_t *)data;
     const uint8_t *const end = p + len;
     uint64_t h64;
@@ -201,17 +200,17 @@ static inline uint64_t getHash_(HashMap *map,
                                 const size_t capacity,
                                 const size_t attempt) {
     size_t size = map->keySize(key);
-    uint64_t hash_a = xxh3(key, size, 0);
-    const uint64_t hash_b = xxh3(key, size, 1);
+    uint64_t hash_a = xxh3_(key, size, 0);
+    const uint64_t hash_b = xxh3_(key, size, 1);
 
     return (hash_a + attempt * (hash_b | 1)) % capacity;
 }
 
 /// === HashMap implementation ===
-static inline Node *nodeNew_(const void *key, const void *val) {
+static inline Node *nodeNew_(void *key, void *val) {
     Node *node = malloc_(sizeof(Node));
-    node->key = (void *)key;
-    node->val = (void *)val;
+    node->key = key;
+    node->val = val;
 
     return node;
 }
@@ -273,9 +272,9 @@ HashMap *hashmapNew(HashMapArgs *args) {
     map->threshold = (size_t)(map->capacity * map->load_factor);
     map->items = calloc_(args->capacity, sizeof(Node *));
     map->keySize = args->keySize;
+    map->keyCmp = args->keyCmp;
     map->keyFree = args->keyFree;
     map->valFree = args->valFree;
-    map->keyCmp = args->keyCmp;
     map->print = args->print;
     map->tombstone.key = NULL;
     map->tombstone.val = NULL;
@@ -283,7 +282,7 @@ HashMap *hashmapNew(HashMapArgs *args) {
     return map;
 }
 
-void hashmapSet(HashMap *map, const void *key, const void *val) {
+void hashmapSet(HashMap *map, void *key, void *val) {
     if (!map || !key || !val) {
         return;
     }

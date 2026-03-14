@@ -10,7 +10,6 @@
 #ifndef STR_H
 #define STR_H
 
-#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,6 +36,8 @@ String strSlice(const String s, size_t start, size_t end);
 /// Get string length
 size_t strLen(const String s);
 /// Comparison of strings
+int strCmpLen(const String s1, const void *s2, size_t s2_len);
+int strCmpCStr(const String s1, const char *s2);
 int strCmp(const String s1, const String s2);
 /// Grow or trim strings
 /// MUST reasign back to original string (whatever parameter s was previously)
@@ -136,13 +137,12 @@ size_t strLen(const String s) {
     return getStrLen_(s);
 }
 
-int strCmp(const String s1, const String s2) {
+int strCmpLen(const String s1, const void *s2, size_t s2_len) {
     if (!s1 || !s2) {
         return -1;
     }
 
     size_t s1_len = getStrLen_(s1);
-    size_t s2_len = getStrLen_(s2);
     size_t min_len = s1_len < s2_len ? s1_len : s2_len;
 
     int cmp = memcmp(s1, s2, min_len);
@@ -151,6 +151,14 @@ int strCmp(const String s1, const String s2) {
     }
 
     return (s1_len > s2_len) - (s1_len < s2_len);
+}
+
+int strCmp(const String s1, const String s2) {
+    return strCmpLen(s1, s2, strLen(s2));
+}
+
+int strCmpCStr(const String s1, const char *s2) {
+    return strCmpLen(s1, s2, strlen(s2));
 }
 
 String strDup(const String s) {
@@ -476,7 +484,7 @@ String strToLower(String s) {
 
     size_t len = getStrLen_(s);
     for (size_t i = 0; i < len; i++) {
-        s[i] = tolower(s[i]);
+        s[i] += 32 * (s[i] >= 'A' && s[i] <= 'Z');
     }
 
     return s;
@@ -489,7 +497,7 @@ String strToUpper(String s) {
 
     size_t len = getStrLen_(s);
     for (size_t i = 0; i < len; i++) {
-        s[i] = toupper(s[i]);
+        s[i] -= 32 * (s[i] >= 'a' && s[i] <= 'z');
     }
 
     return s;

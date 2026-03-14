@@ -2,20 +2,18 @@
 * TCP abstraction layer with linux sockets api
 * Uses non blocking sockets for concurrency with epoll api
 *
-* DEPENDENCIES: mem/pool.h
-* USAGE:
+* NOTE: To use this library define the following macro in EXACTLY
+* ONE FILE BEFORE inlcuding tcp.h:
 *   #define TCP_IMPLEMENTATION
-*   #define POOL_IMPLEMENTATION
 *   #include "tcp.h"
 *
+* DEPENDENCIES: mem/pool.h
 * WARNING: Only accessible in Linux
-* TODO:
-*   - Windows and BSD support
 */
 #ifndef TCP_H
 #define TCP_H
 
-#include "pool.h"
+#define POOL_IMPLEMENTATION
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -30,11 +28,16 @@
 #include <wait.h>
 #include <signal.h>
 #include <netdb.h>
+#include "pool.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/// Used for custom general purpose allocators
+/// To use a custom allocators simply define them to the specific allocator's functions
+/// Warning: The function signatures has to be the same as stdlib's allocator
+/// Recommended Allocator: Microsoft's mimalloc
 #define malloc_ malloc
 #define calloc_ calloc
 #define realloc_ realloc
@@ -43,43 +46,38 @@ extern "C" {
 /// Batch size of ready events processed at once by epoll. A higher value means that
 /// it will be more performant while consuming more memory.
 #define MAX_EPOLL_EVENTS 256
+/// The maximum length to which the queue of pending connections for server `Listener.fd`
+/// may grow.
+#define BACKLOG SOMAXCONN
+/// Intial number of chunks in the pool
+#define INITIAL_POOL_SIZE 1024
 
 /// The lifetime of `Event` is managed by `Listener`
 typedef struct {
-    struct epoll_event ev, events[MAX_EPOLL_EVENTS];
-    int fd;
+    struct epoll_event ev_, events[MAX_EPOLL_EVENTS];
+    int fd_;
     int nfds;
 } Event;
 
 typedef struct {
     struct sockaddr_storage addr;
-    PoolAlloc *pool;
+    PoolAlloc *pool_;
     int fd;
-
-    /// Server config
-    char *port;
-    uint16_t backlog;
-    uint16_t pool_size;
 } Listener;
 
 typedef struct {
     struct sockaddr_storage addr;
-    Listener *listener;
+    Listener *listener_;
     int fd;
 } Conn;
 
-/// Helper for tcpListen
-typedef struct {
-    char *port;
-    uint16_t backlog;
-    uint16_t pool_size;
-} ListenerArgs;
-
 /// Initiates the server instance and adds the server socket for polling
+/// Info:
 /// Allocates `Listener` and `Event` on the same heap region [Listener + Event]
 /// Free it with `tcpCloseListener`.
-/// MUST provide a `port`. `backlog` and `pool_size` defaults to SOMAXCONN and 1024.
-Listener *tcpListen(const ListenerArgs *args);
+/// Returns:
+/// On success, returns a Listener instance. On error, returns NULL.
+Listener *tcpListen(char *port);
 /// Poll the sockets for IO multiplexing.
 /// Info:
 /// After the function returns, use the `nfds` field to loop through the available events
@@ -89,16 +87,22 @@ Listener *tcpListen(const ListenerArgs *args);
 /// Warning:
 /// The lifetime of `Event` is managed by `Listener` and thus is allocated and freed
 /// with `Listener`. DO NOT explicitly call free on `Event`
+/// Returns:
+/// On success, returns a Event instance. On error, returns NULL.
 Event *tcpPoll(Listener *listener);
 /// Accepts a client connection and adds it for polling
+/// Info:
 /// Free it with `tcpCloseConn`
+/// Returns:
+/// On success, returns a Conn instance. On error, returns NULL.
 Conn *tcpAccept(Listener *listener);
-/// Handler function for each clients.
+/// Handler function for each clients. Creates a client loop and returns 0 on EAGAIN/EWOULDBLOCK
+/// Returns:
 /// On success, returns a 0. On error, returns -1.
-int tcpHandler(Conn *conn, void (*handler)(Conn *conn));
+int tcpHandler(Conn *conn, int (*handler)(Conn *conn));
 /// Removes the client socket from epoll, closes the socket and frees Conn instance
 /// Warning:
-/// SHOULD be called inside the tcpHandler
+/// SHOULD NOT be called explicitly, maintained by tcpHandler
 void tcpCloseConn(Conn *conn);
 /// Closes both epoll_fd and listener socket and frees Listener instance
 void tcpCloseListener(Listener *listener);
@@ -106,16 +110,12 @@ void tcpCloseListener(Listener *listener);
 /// Receive a message from the socket. Calls `recv` syscall
 /// Returns:
 /// On success, returns the total bytes received.
-/// On error, returns 0 if `fd` gets closed,
-/// -2 if `recv` call returns `EAGAIN/EWOULDBLOCK`
-/// and -1 for general error
+/// On error, returns -1 or 0 if `fd` got closed
 ssize_t tcpRecv(int fd, void *buf, size_t len);
 /// Send a message on socket. Calls `send` in a loop to ensure all the data has been send
 /// Returns:
 /// On success, returns the total bytes send.
-/// On error, returns 0 if `fd` gets closed,
-/// -2 if `send` call returns `EAGAIN/EWOULDBLOCK`
-/// and -1 for general error
+/// On error, returns -1 or 0 if `fd` gets closed
 ssize_t tcpSend(int fd, const void *buf, size_t len);
 
 /// IP version agnostic `inet_ntop`
@@ -123,13 +123,15 @@ ssize_t tcpSend(int fd, const void *buf, size_t len);
 /// Make sure, len >= INET6_ADDRSTRLEN
 /// Returns:
 /// On success, writes the IP address to buf and return the value at buf. On error, returns NULL.
-char *getIPAddr(const struct sockaddr_storage *sa, char *buf, size_t len);
+char *getIPAddr(struct sockaddr_storage *sa, char *buf, size_t len);
 /// IP version agnostic `ntohs`
 /// Warning:
 /// The passed argument CAN NOT be NULL
-uint16_t getPort(const struct sockaddr_storage *sa);
+/// Returns:
+/// The port number
+uint16_t getPort(struct sockaddr_storage *sa);
 
-#ifdef TCP_IMPLEMENTATION
+// #ifdef TCP_IMPLEMENTATION
 
 static int setSockOpt_(int fd) {
     int yes = 1;
@@ -162,7 +164,7 @@ static int setNonBlockingSocket_(int fd) {
     return 0;
 }
 
-static inline Event *getEventPtr_(const Listener *listener) {
+static inline Event *getEventPtr_(Listener *listener) {
     return (Event *)(listener + 1);
 }
 
@@ -188,7 +190,7 @@ static int reapDeadProcs_(void) {
     return 0;
 }
 
-static int tcpEpollInit_(const Listener *listener) {
+static int tcpEpollInit_(Listener *listener) {
     int epoll_fd = epoll_create1(EPOLL_CLOEXEC);
     if (epoll_fd == -1) {
         perror("epoll_create1");
@@ -196,10 +198,10 @@ static int tcpEpollInit_(const Listener *listener) {
     }
 
     Event *event = getEventPtr_(listener);
-    event->fd = epoll_fd;
-    event->ev.data.fd = listener->fd;
-    event->ev.events = EPOLLIN | EPOLLET;
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listener->fd, &event->ev) == -1) {
+    event->fd_ = epoll_fd;
+    event->ev_.data.fd = listener->fd;
+    event->ev_.events = EPOLLIN | EPOLLET;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listener->fd, &event->ev_) == -1) {
         perror("epoll_ctl listener");
         close(epoll_fd);
         return -1;
@@ -208,11 +210,15 @@ static int tcpEpollInit_(const Listener *listener) {
     return 0;
 }
 
-static int addtoEpollList_(const Listener *listener, Conn *conn) {
+static int addtoEpollList_(Listener *listener, Conn *conn) {
+    if (!listener || !conn) {
+        return -1;
+    }
+
     Event *event = getEventPtr_(listener);
-    event->ev.data.ptr = conn;
-    event->ev.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET;
-    if (epoll_ctl(event->fd, EPOLL_CTL_ADD, conn->fd, &event->ev) == -1) {
+    event->ev_.data.ptr = conn;
+    event->ev_.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET;
+    if (epoll_ctl(event->fd_, EPOLL_CTL_ADD, conn->fd, &event->ev_) == -1) {
         perror("epoll_ctl client");
         return -1;
     }
@@ -220,26 +226,14 @@ static int addtoEpollList_(const Listener *listener, Conn *conn) {
     return 0;
 }
 
-Listener *tcpListen(const ListenerArgs *args) {
-    if (!args || !args->port) {
-        return NULL;
-    }
-
+Listener *tcpListen(char *port) {
     // As the lifetime of Listener and Event are same we allocate both of them in a same region,
     // later we access them using getEventPtr_ which returns the Event chunk by moving the listener
     // pointer by sizeof Listener (listener + 1)
     Listener *listener = (Listener *)malloc_(sizeof(Listener) + sizeof(Event));
-    listener->port = args->port;
-    if (args->backlog) {
-        listener->backlog = args->backlog;
-    } else {
-        listener->backlog = SOMAXCONN;
-    }
-
-    if (args->pool_size) {
-        listener->pool_size = args->pool_size;
-    } else {
-        listener->pool_size = 1024;
+    if (!listener) {
+        perror("malloc");
+        return NULL;
     }
 
     struct addrinfo hints, *res, *p;
@@ -248,7 +242,7 @@ Listener *tcpListen(const ListenerArgs *args) {
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
 
-    int rv = getaddrinfo(NULL, listener->port, &hints, &res);
+    int rv = getaddrinfo(NULL, port, &hints, &res);
     if (rv != 0) {
         fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
         return NULL;
@@ -291,7 +285,7 @@ Listener *tcpListen(const ListenerArgs *args) {
 
     listener->fd = fd;
 
-    if (listen(fd, listener->backlog) == -1) {
+    if (listen(fd, BACKLOG) == -1) {
         perror("listen");
         goto clean;
     }
@@ -304,7 +298,7 @@ Listener *tcpListen(const ListenerArgs *args) {
         goto clean;
     }
 
-    listener->pool = poolInit(sizeof(Conn), listener->pool_size);
+    listener->pool_ = poolInit(sizeof(Conn), INITIAL_POOL_SIZE);
 
     return listener;
 
@@ -315,12 +309,8 @@ clean:
 }
 
 Event *tcpPoll(Listener *listener) {
-    if (!listener) {
-        return NULL;
-    }
-
     Event *event = getEventPtr_(listener);
-    event->nfds = epoll_wait(event->fd, event->events, MAX_EPOLL_EVENTS, -1);
+    event->nfds = epoll_wait(event->fd_, event->events, MAX_EPOLL_EVENTS, -1);
     if (event->nfds == -1) {
         perror("epoll_wait");
         tcpCloseListener(listener);
@@ -347,8 +337,8 @@ Conn *tcpAccept(Listener *listener) {
         return NULL;
     }
 
-    Conn *conn = poolAlloc(listener->pool);
-    conn->listener = listener;
+    Conn *conn = poolAlloc(listener->pool_);
+    conn->listener_ = listener;
     conn->fd = conn_fd;
     conn->addr = addr;
 
@@ -364,16 +354,25 @@ Conn *tcpAccept(Listener *listener) {
 
 clean:
     close(conn_fd);
-    poolFree(listener->pool, conn);
+    poolFree(listener->pool_, conn);
     return NULL;
 }
 
-int tcpHandler(Conn *conn, void (*handler)(Conn *conn)) {
+int tcpHandler(Conn *conn, int (*handler)(Conn *conn)) {
     if (!conn || !handler) {
         return -1;
     }
 
-    handler(conn);
+    while (1) {
+        if (handler(conn) == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;
+            }
+            tcpCloseConn(conn);
+            return -1;
+        }
+    }
+
     return 0;
 }
 
@@ -382,12 +381,12 @@ void tcpCloseConn(Conn *conn) {
         return;
     }
 
-    Event *event = getEventPtr_(conn->listener);
-    if (epoll_ctl(event->fd, EPOLL_CTL_DEL, conn->fd, NULL) == -1) {
+    Event *event = getEventPtr_(conn->listener_);
+    if (epoll_ctl(event->fd_, EPOLL_CTL_DEL, conn->fd, NULL) == -1) {
         perror("epoll_ctl del");
     }
     close(conn->fd);
-    poolFree(conn->listener->pool, conn);
+    poolFree(conn->listener_->pool_, conn);
 }
 
 void tcpCloseListener(Listener *listener) {
@@ -396,9 +395,9 @@ void tcpCloseListener(Listener *listener) {
     }
 
     Event *event = getEventPtr_(listener);
-    close(event->fd);
+    close(event->fd_);
     close(listener->fd);
-    poolDestroy(listener->pool);
+    poolDestroy(listener->pool_);
     free_(listener);
 }
 
@@ -410,7 +409,7 @@ ssize_t tcpRecv(int fd, void *buf, size_t len) {
     ssize_t bytes_recv = recv(fd, buf, len, 0);
     if (bytes_recv == -1) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return -2;
+            return -1;
         }
         perror("recv");
         return -1;
@@ -435,7 +434,7 @@ ssize_t tcpSend(int fd, const void *buf, size_t len) {
             send(fd, (const char *)buf + total, bytes_left, MSG_NOSIGNAL);
         if (bytes_send == -1) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                return -2;
+                return -1;
             }
             perror("send");
             return -1;
@@ -450,7 +449,7 @@ ssize_t tcpSend(int fd, const void *buf, size_t len) {
     return total;
 }
 
-char *getIPAddr(const struct sockaddr_storage *sa, char *buf, size_t len) {
+char *getIPAddr(struct sockaddr_storage *sa, char *buf, size_t len) {
     if (!sa || !buf) {
         return NULL;
     }
@@ -466,7 +465,7 @@ char *getIPAddr(const struct sockaddr_storage *sa, char *buf, size_t len) {
     return buf;
 }
 
-uint16_t getPort(const struct sockaddr_storage *sa) {
+uint16_t getPort(struct sockaddr_storage *sa) {
     if (sa->ss_family == AF_INET) {
         struct sockaddr_in *s = (struct sockaddr_in *)sa;
         return ntohs(s->sin_port);
@@ -476,7 +475,7 @@ uint16_t getPort(const struct sockaddr_storage *sa) {
     }
 }
 
-#endif // TCP_IMPLEMENTATION
+// #endif // TCP_IMPLEMENTATION
 
 #undef malloc_
 #undef calloc_

@@ -7,7 +7,7 @@ MODE ?= debug
 ifeq ($(MODE), release)
 	cflags += -O2 -ffast-math -march=native
 else
-	cflags += -g3 -fsanitize=address,undefined,leak
+	cflags += -O0 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined,leak
 endif
 
 srcs := $(wildcard src/*.c)
