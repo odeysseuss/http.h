@@ -21,9 +21,11 @@
 #ifndef HTTP_H
 #define HTTP_H
 
+#include "pool.h"
 #include "tcp.h"
 #include "str.h"
 #include "hashmap.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -69,12 +71,25 @@ typedef struct {
     String body;
 } HttpResponse;
 
+/// represents an http connection
 typedef struct {
     HttpRequest *req;
     HttpResponse *res;
 } HttpConn;
 
-HttpConn *httpInit(const Conn *conn);
+typedef struct {
+    Listener *listener;
+    PoolAlloc *http_pool; // connection pool
+    HashMap *mime_types;
+} HttpServer;
+
+typedef struct {
+    char *port;
+    uint16_t pool_size;
+} HttpArgs;
+
+HttpServer *httpInit(HttpArgs *args);
+HttpConn *httpConnInit(const Conn *conn);
 HttpRequest *httpParseReq(HttpConn *ser, const String buf);
 HttpResponse *httpGet(const HttpRequest *req,
                       const char *route,
@@ -84,29 +99,97 @@ HttpResponse *httpPost(const HttpRequest *req,
                        void (*postHadler)(HttpRequest *req));
 HttpResponse *httpFileServe(const HttpRequest *req, const char *path);
 int httpSendResponse(const HttpResponse *res);
-void httpFree(HttpConn *conn);
+void httpConnFree(HttpConn *conn);
+void httpFree(HttpServer *server);
 
 #ifdef HTTP_IMPLEMENTATION
 
-#    define INITIAL_HASHMAP_CAPACITY 64
+#    define INITIAL_REQUEST_HEADERS_CAPACITY 32
+#    define INITIAL_RESPONSE_HEADERS_CAPACITY 8
+#    define INITIAL_MIME_CAPACITY 16
 
+// === Headers hashmap helpers ===
 static size_t mapKeysize_(const void *key) {
     return strLen((String)key);
-}
-
-static void mapKeyValFree_(void *node) {
-    strFree(node);
 }
 
 static int mapKeyCompare_(const void *a, const void *b) {
     return strCmp((String)a, (String)b);
 }
 
+static void mapKeyValFree_(void *node) {
+    strFree(node);
+}
+
 static void mapPrint_(const void *key, const void *val) {
     printf("%s: %s\n", (char *)key, (char *)val);
 }
 
-HttpConn *httpInit(const Conn *conn) {
+// === Mime hashmap helpers ===
+static size_t mimeMapKeySize_(const void *key) {
+    return strlen(key);
+}
+
+static int mimeMapKeyCmp_(const void *a, const void *b) {
+    return strcmp(a, b);
+}
+
+static HashMap *httpMimeMapInit_(HashMap *map) {
+    hashmapSet(map, ".txt", "text/plain");
+    hashmapSet(map, ".html", "text/html");
+    hashmapSet(map, ".css", "text/css");
+    hashmapSet(map, ".js", "application/javascript");
+    hashmapSet(map, ".json", "application/json");
+    hashmapSet(map, ".png", "image/png");
+    hashmapSet(map, ".svg", "image/svg");
+    hashmapSet(map, ".jpg", "image/jpeg");
+    hashmapSet(map, ".jpeg", "image/jpeg");
+
+    return map;
+}
+
+// === Http helpers ===
+HttpServer *httpInit(HttpArgs *args) {
+    if (!args || !args->port) {
+        return NULL;
+    }
+
+    uint16_t pool_size = 0;
+    if (args->pool_size) {
+        pool_size = args->pool_size;
+    } else {
+        pool_size = 1024;
+    }
+
+    Listener *listener = tcpListen(&(ListenerArgs){
+        .port = args->port,
+        .pool_size = args->pool_size,
+    });
+    if (!listener) {
+        return NULL;
+    }
+
+    char buf[INET6_ADDRSTRLEN];
+    fprintf(stdout,
+            "[Listening] %s:%d\n",
+            getIPAddr(&listener->addr, buf, sizeof(buf)),
+            getPort(&listener->addr));
+
+    HttpServer *server = malloc_(sizeof(HttpServer));
+    server->listener = listener;
+    server->http_pool = poolInit(sizeof(HttpConn), pool_size);
+    server->mime_types = hashmapNew(&(HashMapArgs){
+        .capacity = INITIAL_MIME_CAPACITY,
+        .keySize = mimeMapKeySize_,
+        .keyCmp = mimeMapKeyCmp_,
+        .print = mapPrint_,
+    });
+    httpMimeMapInit_(server->mime_types);
+
+    return server;
+}
+
+HttpConn *httpConnInit(const Conn *conn) {
     if (!conn) {
         return NULL;
     }
@@ -135,7 +218,7 @@ HttpRequest *httpParseReq(HttpConn *ser, const String buf) {
     size_t header_start = req_line_end + 2;
     size_t header_end = strFindLen(buf, "\r\n\r\n", 4);
     req->headers = hashmapNew(&(HashMapArgs){
-        .capacity = 16,
+        .capacity = INITIAL_REQUEST_HEADERS_CAPACITY,
         .keySize = mapKeysize_,
         .keyFree = mapKeyValFree_,
         .valFree = mapKeyValFree_,
@@ -165,7 +248,7 @@ HttpRequest *httpParseReq(HttpConn *ser, const String buf) {
     return req;
 }
 
-void httpFree(HttpConn *conn) {
+void httpConnFree(HttpConn *conn) {
     if (!conn) {
         return;
     }
@@ -179,6 +262,17 @@ void httpFree(HttpConn *conn) {
     strFree(conn->res->body);
 
     free_(conn);
+}
+
+void httpFree(HttpServer *server) {
+    if (!server) {
+        return;
+    }
+
+    poolDestroy(server->http_pool);
+    tcpCloseListener(server->listener);
+    hashmapFree(server->mime_types);
+    free_(server);
 }
 
 #endif // HTTP_IMPLEMENTATION
