@@ -15,7 +15,6 @@
 *   #define HASHMAP_IMPLEMENTATION
 *   #include "http.h"
 *
-* REFERENCE: rfc 7231
 * WARNING: Only accessible in Linux as net/tcp.h is Linux only
 */
 #ifndef HTTP_H
@@ -86,6 +85,9 @@ typedef struct {
 typedef struct {
     char *port;
     uint16_t pool_size;
+    void (*onAccept)(const Conn *conn);
+    void (*onClose)(const Conn *conn);
+    int (*tcpHandler)(const Conn *conn);
 } HttpArgs;
 
 HttpServer *httpInit(HttpArgs *args);
@@ -102,11 +104,11 @@ int httpSendResponse(const HttpResponse *res);
 void httpConnFree(HttpConn *conn);
 void httpFree(HttpServer *server);
 
-#ifdef HTTP_IMPLEMENTATION
+// #ifdef HTTP_IMPLEMENTATION
 
-#    define INITIAL_REQUEST_HEADERS_CAPACITY 32
-#    define INITIAL_RESPONSE_HEADERS_CAPACITY 8
-#    define INITIAL_MIME_CAPACITY 16
+#define INITIAL_REQUEST_HEADERS_CAPACITY 32
+#define INITIAL_RESPONSE_HEADERS_CAPACITY 8
+#define INITIAL_MIME_CAPACITY 16
 
 // === Headers hashmap helpers ===
 static size_t mapKeysize_(const void *key) {
@@ -150,7 +152,7 @@ static HashMap *httpMimeMapInit_(HashMap *map) {
 
 // === Http helpers ===
 HttpServer *httpInit(HttpArgs *args) {
-    if (!args || !args->port) {
+    if (!args || !args->port || !args->tcpHandler) {
         return NULL;
     }
 
@@ -175,8 +177,44 @@ HttpServer *httpInit(HttpArgs *args) {
             getIPAddr(&listener->addr, buf, sizeof(buf)),
             getPort(&listener->addr));
 
+    while (1) {
+        Event *event = tcpPoll(listener);
+        if (!event) {
+            break;
+        }
+
+        int nfds = event->nfds;
+        for (int i = 0; i < nfds; i++) {
+            if (event->events[i].data.fd == listener->fd) {
+                while (1) {
+                    Conn *conn = tcpAccept(listener);
+                    if (!conn) {
+                        break;
+                    }
+                    if (args->onAccept) {
+                        args->onAccept(conn);
+                    }
+                }
+            } else {
+                Conn *conn = event->events[i].data.ptr;
+                if (tcpHandler(conn, args->tcpHandler) == -1) {
+                    fprintf(stderr,
+                            "[Error] tcpHandler (%s:%d)\n",
+                            getIPAddr(&conn->addr, buf, INET6_ADDRSTRLEN),
+                            getPort(&conn->addr));
+                }
+
+                if (event->events[i].events &
+                    (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+                    if (args->onClose) {
+                        args->onClose(conn);
+                    }
+                }
+            }
+        }
+    }
+
     HttpServer *server = malloc_(sizeof(HttpServer));
-    server->listener = listener;
     server->http_pool = poolInit(sizeof(HttpConn), pool_size);
     server->mime_types = hashmapNew(&(HashMapArgs){
         .capacity = INITIAL_MIME_CAPACITY,
@@ -275,7 +313,7 @@ void httpFree(HttpServer *server) {
     free_(server);
 }
 
-#endif // HTTP_IMPLEMENTATION
+// #endif // HTTP_IMPLEMENTATION
 
 #undef malloc_
 #undef calloc_

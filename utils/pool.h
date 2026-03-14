@@ -9,7 +9,6 @@
 #ifndef POOL_H
 #define POOL_H
 
-#include <fcntl.h>
 #include <stdlib.h>
 
 #ifdef __cplusplus

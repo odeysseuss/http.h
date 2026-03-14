@@ -100,7 +100,7 @@ Conn *tcpAccept(Listener *listener);
 /// Handler function for each clients. Creates a client loop and returns 0 on EAGAIN/EWOULDBLOCK
 /// Returns:
 /// On success, returns a 0. On error, returns -1.
-int tcpHandler(Conn *conn, int (*handler)(Conn *conn));
+int tcpHandler(Conn *conn, int (*handler)(const Conn *conn));
 /// Removes the client socket from epoll, closes the socket and frees Conn instance
 /// Warning:
 /// SHOULD NOT be called explicitly, maintained by tcpHandler
@@ -124,13 +124,13 @@ ssize_t tcpSend(int fd, const void *buf, size_t len);
 /// Make sure, len >= INET6_ADDRSTRLEN
 /// Returns:
 /// On success, writes the IP address to buf and return the value at buf. On error, returns NULL.
-char *getIPAddr(struct sockaddr_storage *sa, char *buf, size_t len);
+char *getIPAddr(const struct sockaddr_storage *sa, char *buf, size_t len);
 /// IP version agnostic `ntohs`
 /// Warning:
 /// The passed argument CAN NOT be NULL
 /// Returns:
 /// The port number
-uint16_t getPort(struct sockaddr_storage *sa);
+uint16_t getPort(const struct sockaddr_storage *sa);
 
 #ifdef TCP_IMPLEMENTATION
 
@@ -376,7 +376,7 @@ clean:
     return NULL;
 }
 
-int tcpHandler(Conn *conn, int (*handler)(Conn *conn)) {
+int tcpHandler(Conn *conn, int (*handler)(const Conn *conn)) {
     if (!conn || !handler) {
         return -1;
     }
@@ -467,7 +467,7 @@ ssize_t tcpSend(int fd, const void *buf, size_t len) {
     return total;
 }
 
-char *getIPAddr(struct sockaddr_storage *sa, char *buf, size_t len) {
+char *getIPAddr(const struct sockaddr_storage *sa, char *buf, size_t len) {
     if (!sa || !buf) {
         return NULL;
     }
@@ -483,7 +483,7 @@ char *getIPAddr(struct sockaddr_storage *sa, char *buf, size_t len) {
     return buf;
 }
 
-uint16_t getPort(struct sockaddr_storage *sa) {
+uint16_t getPort(const struct sockaddr_storage *sa) {
     if (sa->ss_family == AF_INET) {
         struct sockaddr_in *s = (struct sockaddr_in *)sa;
         return ntohs(s->sin_port);

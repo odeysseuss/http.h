@@ -10,24 +10,33 @@
 
 #define PORT "8000"
 
-int readAndWrite(Conn *conn) {
+void onAccept(const Conn *conn) {
+    char buf[INET6_ADDRSTRLEN];
+    fprintf(stdout,
+            "[Connected] %s:%d (fd: %d)\n",
+            getIPAddr(&conn->addr, buf, INET6_ADDRSTRLEN),
+            getPort(&conn->addr),
+            conn->fd);
+}
+
+void onClose(const Conn *conn) {
+    char buf[INET6_ADDRSTRLEN];
+    fprintf(stdout,
+            "[Disconnected] %s:%d (fd: %d)\n",
+            getIPAddr(&conn->addr, buf, INET6_ADDRSTRLEN),
+            getPort(&conn->addr),
+            conn->fd);
+}
+
+int httpHandler(const Conn *conn) {
     if (!conn || conn->fd < 0) {
         return -1;
     }
 
     char buf[1024];
-    char str[INET6_ADDRSTRLEN];
 
     ssize_t bytes_recv = tcpRecv(conn->fd, buf, sizeof(buf) - 1);
-    if (bytes_recv == -1) {
-        return -1;
-    } else if (bytes_recv == 0) {
-        fprintf(stdout,
-                "[Disconnected] %s:%d (fd: %d)\n",
-                getIPAddr(&conn->addr, str, INET6_ADDRSTRLEN),
-                getPort(&conn->addr),
-                conn->fd);
-
+    if (bytes_recv <= 0) {
         return -1;
     }
 
@@ -42,43 +51,14 @@ int readAndWrite(Conn *conn) {
 }
 
 int main(void) {
-    char buf[INET6_ADDRSTRLEN];
-
     HttpServer *http = httpInit(&(HttpArgs){
         .port = PORT,
+        .onAccept = onAccept,
+        .onClose = onClose,
+        .tcpHandler = httpHandler,
     });
 
     hashmapPrint(http->mime_types);
-
-    while (1) {
-        Event *event = tcpPoll(http->listener);
-        if (!event) {
-            break;
-        }
-
-        int nfds = event->nfds;
-        for (int i = 0; i < nfds; i++) {
-            if (event->events[i].data.fd == http->listener->fd) {
-                while (1) {
-                    Conn *conn = tcpAccept(http->listener);
-                    if (!conn) {
-                        break;
-                    }
-
-                    fprintf(stdout,
-                            "[Connected] %s:%d (fd: %d)\n",
-                            getIPAddr(&conn->addr, buf, INET6_ADDRSTRLEN),
-                            getPort(&conn->addr),
-                            conn->fd);
-                }
-            } else {
-                Conn *conn = event->events[i].data.ptr;
-                if (tcpHandler(conn, readAndWrite) == -1) {
-                    fprintf(stderr, "Error in tcpHandler\n");
-                }
-            }
-        }
-    }
 
     httpFree(http);
 
