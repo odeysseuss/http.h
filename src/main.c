@@ -1,3 +1,4 @@
+#include <stdio.h>
 #define ARENA_IMPLEMENTATION
 #define POOL_IMPLEMENTATION
 #define TCP_IMPLEMENTATION
@@ -42,9 +43,11 @@ int handler(const TcpConn *conn) {
     }
 
     String req_buf = strNewLen(buf, bytes_recv);
+    printf("request: %s\n", req_buf);
     HttpConn *ser = httpConnInit(conn);
     HttpRequest *req = httpParseReq(ser, req_buf);
-    printf("req_line: %s\n", req->req_line);
+    printf("method: %d\n", req->method);
+    printf("route: %s\n", req->route);
     hashmapPrint(req->headers);
     printf("body: %s\n", req->body);
 

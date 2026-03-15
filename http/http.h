@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,19 +53,38 @@ typedef enum {
 
 /// Http methods
 typedef enum {
-    HTTP_GET,
+    // ref: [mdn/httpmethods](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Methods)
+    HTTP_GET = 0,
+    HTTP_HEAD,
+    HTTP_OPTIONS,
+    HTTP_TRACE,
+    HTTP_PUT,
+    HTTP_DELETE,
     HTTP_POST,
+    HTTP_PATCH,
+    HTTP_CONNECT
 } HttpMethod;
+
+typedef struct HttpConn HttpConn;
+typedef void (*Route_Handler)(HttpConn *conn);
+
+typedef struct Router {
+    String route;
+    Route_Handler handler;
+    HttpMethod method;
+    struct Router *next;
+} Router;
 
 typedef struct {
     /// method     path        version
     /// GET     /index.html  HTTP/1.1\r\n
     /// key: value
-    /// { body }
     const TcpConn *conn;
-    String req_line;
+    String route;
     HashMap *headers;
     String body;
+    Router *routes;
+    HttpMethod method;
 } HttpRequest;
 
 typedef struct {
@@ -79,11 +99,11 @@ typedef struct {
 } HttpResponse;
 
 /// represents an http connection
-typedef struct {
+struct HttpConn {
     const TcpConn *conn;
     HttpRequest *req;
     HttpResponse *res;
-} HttpConn;
+};
 
 typedef struct {
     TcpListener *listener;
@@ -103,7 +123,6 @@ HttpServer *httpInit(size_t pool_size);
 int httpLoop(HttpServer *server, HttpArgs *args);
 HttpConn *httpConnInit(const TcpConn *conn);
 HttpRequest *httpParseReq(HttpConn *ser, const String buf);
-typedef void (*Route_Handler)(HttpConn *conn);
 void httpGet(HttpConn *conn, const char *route, Route_Handler getHandler);
 void httpPost(HttpConn *conn, const char *route, Route_Handler postHandler);
 void httpFileServ(HttpConn *conn, const char *path);
@@ -160,6 +179,35 @@ static HashMap *httpMimeMapInit_(HashMap *map) {
     hashmapSet(map, ".ttf", "font/ttf");
 
     return map;
+}
+
+// Parsing helpers
+static HttpMethod getHttpMethod_(char *method) {
+    switch (method[0]) {
+    case 'G':
+        return HTTP_GET;
+    case 'H':
+        return HTTP_HEAD;
+    case 'O':
+        return HTTP_OPTIONS;
+    case 'T':
+        return HTTP_TRACE;
+    case 'P':
+        switch (method[1]) {
+        case 'U':
+            return HTTP_PUT;
+        case 'O':
+            return HTTP_POST;
+        case 'A':
+            return HTTP_PATCH;
+        }
+    case 'D':
+        return HTTP_DELETE;
+    case 'C':
+        return HTTP_CONNECT;
+    default:
+        return -1;
+    }
 }
 
 // === Http API implementation ===
@@ -268,11 +316,28 @@ HttpRequest *httpParseReq(HttpConn *ser, const String buf) {
 
     HttpRequest *req = ser->req;
 
-    size_t req_line_end = strFindLen(buf, "\r\n", 2);
-    req->req_line = strNewLen(buf, req_line_end);
+    // initiate method
+    char *temp = buf;
+    char method[16];
+    int i = 0;
+    while (*temp != ' ' && i < 15) {
+        method[i] = *temp;
+        temp++;
+        i++;
+    }
+    req->method = getHttpMethod_(method);
 
-    size_t header_start = req_line_end + 2;
-    size_t header_end = strFindLen(buf, "\r\n\r\n", 4);
+    // initiate route
+    char *route_end = strchr(temp + 1, ' ');
+    req->route = strNewLen(temp, route_end - temp);
+    // just gonna ignore the http version now
+
+    // header buffer
+    size_t req_line_end_i = strFindLen(buf, "\r\n", 2);
+    size_t header_start_i = req_line_end_i + 2;
+    size_t header_end_i = strFindLen(buf, "\r\n\r\n", 4);
+
+    // initiate hashmap
     req->headers = hashmapNew(&(HashMapArgs){
         .capacity = INITIAL_REQUEST_HEADERS_CAPACITY,
         .keySize = mapKeysize_,
@@ -281,8 +346,10 @@ HttpRequest *httpParseReq(HttpConn *ser, const String buf) {
         .keyCmp = mapKeyCompare_,
         .print = mapPrint_,
     });
-    size_t curr_pos = header_start;
-    while (curr_pos < header_end) {
+
+    // add headers in hashmap
+    size_t curr_pos = header_start_i;
+    while (curr_pos < header_end_i) {
         char *key_start = buf + curr_pos;
         char *colon = strchr(key_start, ':');
         size_t key_len = colon - key_start;
@@ -299,7 +366,9 @@ HttpRequest *httpParseReq(HttpConn *ser, const String buf) {
         curr_pos = (header_line_end - buf) + 2;
     }
 
-    req->body = strSlice(buf, header_end + 4, strLen(buf));
+    // initiate body and routes
+    req->body = strSlice(buf, header_end_i + 4, strLen(buf));
+    req->routes = NULL;
 
     return req;
 }
@@ -310,7 +379,7 @@ void httpConnFree(HttpConn *conn) {
         return;
     }
 
-    strFree(conn->req->req_line);
+    strFree(conn->req->route);
     hashmapFree(conn->req->headers);
     strFree(conn->req->body);
 
