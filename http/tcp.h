@@ -27,6 +27,7 @@
 #include <wait.h>
 #include <signal.h>
 #include <netdb.h>
+#include "arena.h"
 #include "pool.h"
 
 #ifdef __cplusplus
@@ -50,63 +51,62 @@ extern "C" {
 typedef struct {
     struct epoll_event ev, events[MAX_EPOLL_EVENTS];
     int fd;
-    int nfds;
-} Event;
+    int nfds; /// Count of all the events
+} TcpEvent;
 
 typedef struct {
     struct sockaddr_storage addr;
-    PoolAlloc *pool;
+    PoolAlloc *pool;   /// Memory for all incoming connections
+    size_t arena_size; /// Memory size allocated per client
     int fd;
-} Listener;
+} TcpListener;
 
 typedef struct {
     struct sockaddr_storage addr;
-    Listener *listener;
+    const TcpListener *listener; /// Used for freeing specific clients
+    ArenaAlloc *arena;           /// Memory per client
     int fd;
-} Conn;
+} TcpConn;
 
+/// Helper for tcpListen
 typedef struct {
     char *port;
+    size_t arena_size;
+    size_t pool_size;
     uint16_t backlog;
-    uint16_t pool_size;
-} ListenerArgs;
+} TcpListenerArgs;
 
 /// Initiates the server instance and adds the server socket for polling
 /// Info:
-/// MUST provide a `port`. `backlog` fallbacks to SOMAXCONN and `pool_size` fallbacks to `1024`
-/// Allocates `Listener` and `Event` on the same heap region [Listener + Event]
+/// MUST provide a `port`. `backlog` fallbacks to `SOMAXCONN` and `pool_size` fallbacks to `1024`
+/// If any specific data needs to be allocated per block specipy `arena_size`. The lifetime of `ArenaAlloc`
+/// is maintained by the `TcpConn`
+/// Allocates `TcpListener` and `TcpEvent` on the same heap region `[TcpListener + TcpEvent]`
 /// Free it with `tcpCloseListener`.
-/// Returns:
-/// On success, returns a Listener instance. On error, returns NULL.
-Listener *tcpListen(ListenerArgs *args);
+TcpListener *tcpListen(const TcpListenerArgs *args);
 /// Poll the sockets for IO multiplexing.
 /// Info:
+/// If `epoll_wait` returns -1 it closes the `TcpListener` by `tcpCloseListener`
 /// After the function returns, use the `nfds` field to loop through the available events
 /// and check for the specific event's `data.fd`. If fd is `listener.fd` then event occured
 /// in server. For server event, run `tcpAccept` and for each client run `tcpHandler`.
-/// `tcpHandler` can get the Conn pointer from `data.ptr`.
+/// `tcpHandler` can get the `TcpConn` pointer from `data.ptr`.
 /// Warning:
-/// The lifetime of `Event` is managed by `Listener` and thus is allocated and freed
-/// with `Listener`. DO NOT explicitly call free on `Event`
-/// Returns:
-/// On success, returns a Event instance. On error, returns NULL.
-Event *tcpPoll(Listener *listener);
+/// The lifetime of `TcpEvent` is managed by `TcpListener` and thus is allocated and freed
+/// with `TcpListener`. DO NOT explicitly call free on `TcpEvent`
+TcpEvent *tcpPoll(TcpListener *listener);
 /// Accepts a client connection and adds it for polling
 /// Info:
 /// Free it with `tcpCloseConn`
-/// Returns:
-/// On success, returns a Conn instance. On error, returns NULL.
-Conn *tcpAccept(Listener *listener);
-/// Handler function for each clients. Creates a client loop and returns 0 on EAGAIN/EWOULDBLOCK
-/// Returns:
-/// On success, returns a 0. On error, returns -1.
-int tcpHandler(Conn *conn, int (*handler)(const Conn *conn));
-/// Removes the client socket from epoll, closes the socket and frees Conn instance
+TcpConn *tcpAccept(const TcpListener *listener);
+/// Handler function for each clients. Creates a client loop and returns 0 on `EAGAIN/EWOULDBLOCK`
+int tcpHandler(TcpConn *conn, int (*handler)(const TcpConn *conn));
+/// Removes the client socket from epoll, closes the socket and frees `TcpConn` instance
 /// Warning:
-/// SHOULD NOT be called explicitly, maintained by tcpHandler
-void tcpCloseConn(Conn *conn);
-/// Closes both epoll_fd and listener socket and frees Listener instance
-void tcpCloseListener(Listener *listener);
+/// SHOULD NOT be called explicitly, maintained by `tcpHandler`
+void tcpCloseConn(TcpConn *conn);
+/// Closes both `epoll_fd` and `listener.fd` and frees `TcpListener` instance
+void tcpCloseListener(TcpListener *listener);
 
 /// Receive a message from the socket. Calls `recv` syscall
 /// Returns:
@@ -165,8 +165,8 @@ static int setNonBlockingSocket_(int fd) {
     return 0;
 }
 
-static inline Event *getEventPtr_(Listener *listener) {
-    return (Event *)(listener + 1);
+static inline TcpEvent *getEventPtr_(const TcpListener *listener) {
+    return (TcpEvent *)(listener + 1);
 }
 
 static inline void sigchldHandler_(int s) {
@@ -191,14 +191,14 @@ static int reapDeadProcs_(void) {
     return 0;
 }
 
-static int tcpEpollInit_(Listener *listener) {
+static int tcpEpollInit_(const TcpListener *listener) {
     int epoll_fd = epoll_create1(EPOLL_CLOEXEC);
     if (epoll_fd == -1) {
         perror("epoll_create1");
         return -1;
     }
 
-    Event *event = getEventPtr_(listener);
+    TcpEvent *event = getEventPtr_(listener);
     event->fd = epoll_fd;
     event->ev.data.fd = listener->fd;
     event->ev.events = EPOLLIN | EPOLLET;
@@ -211,12 +211,12 @@ static int tcpEpollInit_(Listener *listener) {
     return 0;
 }
 
-static int addtoEpollList_(Listener *listener, Conn *conn) {
+static int addtoEpollList_(const TcpListener *listener, TcpConn *conn) {
     if (!listener || !conn) {
         return -1;
     }
 
-    Event *event = getEventPtr_(listener);
+    TcpEvent *event = getEventPtr_(listener);
     event->ev.data.ptr = conn;
     event->ev.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET;
     if (epoll_ctl(event->fd, EPOLL_CTL_ADD, conn->fd, &event->ev) == -1) {
@@ -227,15 +227,16 @@ static int addtoEpollList_(Listener *listener, Conn *conn) {
     return 0;
 }
 
-Listener *tcpListen(ListenerArgs *args) {
-    // As the lifetime of Listener and Event are same we allocate both of them in a same region,
-    // later we access them using getEventPtr_ which returns the Event chunk by moving the listener
-    // pointer by sizeof Listener (listener + 1)
+TcpListener *tcpListen(const TcpListenerArgs *args) {
+    // As the lifetime of TcpListener and TcpEvent are same we allocate both of them in a same region,
+    // later we access them using getEventPtr_ which returns the TcpEvent chunk by moving the listener
+    // pointer by sizeof TcpListener (listener + 1)
     if (!args || !args->port) {
         return NULL;
     }
 
-    Listener *listener = (Listener *)malloc_(sizeof(Listener) + sizeof(Event));
+    TcpListener *listener =
+        (TcpListener *)malloc_(sizeof(TcpListener) + sizeof(TcpEvent));
     if (!listener) {
         perror("malloc");
         return NULL;
@@ -310,13 +311,17 @@ Listener *tcpListen(ListenerArgs *args) {
         goto clean;
     }
 
-    uint16_t pool_size = 0;
+    size_t pool_size = 0;
     if (args->pool_size) {
         pool_size = args->pool_size;
     } else {
         pool_size = 1024;
     }
-    listener->pool = poolInit(sizeof(Conn), pool_size);
+    listener->pool = poolInit(sizeof(TcpConn), pool_size);
+
+    if (args->arena_size) {
+        listener->arena_size = args->arena_size;
+    }
 
     return listener;
 
@@ -326,8 +331,8 @@ clean:
     return NULL;
 }
 
-Event *tcpPoll(Listener *listener) {
-    Event *event = getEventPtr_(listener);
+TcpEvent *tcpPoll(TcpListener *listener) {
+    TcpEvent *event = getEventPtr_(listener);
     event->nfds = epoll_wait(event->fd, event->events, MAX_EPOLL_EVENTS, -1);
     if (event->nfds == -1) {
         perror("epoll_wait");
@@ -338,7 +343,7 @@ Event *tcpPoll(Listener *listener) {
     return event;
 }
 
-Conn *tcpAccept(Listener *listener) {
+TcpConn *tcpAccept(const TcpListener *listener) {
     if (!listener) {
         return NULL;
     }
@@ -355,8 +360,11 @@ Conn *tcpAccept(Listener *listener) {
         return NULL;
     }
 
-    Conn *conn = poolAlloc(listener->pool);
+    TcpConn *conn = poolAlloc(listener->pool);
     conn->listener = listener;
+    if (listener->arena_size) {
+        conn->arena = arenaInit(listener->arena_size);
+    }
     conn->fd = conn_fd;
     conn->addr = addr;
 
@@ -376,7 +384,7 @@ clean:
     return NULL;
 }
 
-int tcpHandler(Conn *conn, int (*handler)(const Conn *conn)) {
+int tcpHandler(TcpConn *conn, int (*handler)(const TcpConn *conn)) {
     if (!conn || !handler) {
         return -1;
     }
@@ -394,25 +402,26 @@ int tcpHandler(Conn *conn, int (*handler)(const Conn *conn)) {
     return 0;
 }
 
-void tcpCloseConn(Conn *conn) {
+void tcpCloseConn(TcpConn *conn) {
     if (!conn) {
         return;
     }
 
-    Event *event = getEventPtr_(conn->listener);
+    TcpEvent *event = getEventPtr_(conn->listener);
     if (epoll_ctl(event->fd, EPOLL_CTL_DEL, conn->fd, NULL) == -1) {
         perror("epoll_ctl del");
     }
     close(conn->fd);
     poolFree(conn->listener->pool, conn);
+    arenaFree(conn->arena);
 }
 
-void tcpCloseListener(Listener *listener) {
+void tcpCloseListener(TcpListener *listener) {
     if (!listener) {
         return;
     }
 
-    Event *event = getEventPtr_(listener);
+    TcpEvent *event = getEventPtr_(listener);
     close(event->fd);
     close(listener->fd);
     poolDestroy(listener->pool);

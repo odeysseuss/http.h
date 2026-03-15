@@ -264,11 +264,7 @@ HashMap *hashmapNew(HashMapArgs *args) {
     HashMap *map = malloc_(sizeof(HashMap));
     map->size = 0;
     map->capacity = args->capacity;
-    if (args->load_factor) {
-        map->load_factor = args->load_factor;
-    } else {
-        map->load_factor = 0.75;
-    }
+    map->load_factor = args->load_factor ? args->load_factor : 0.75;
     map->threshold = (size_t)(map->capacity * map->load_factor);
     map->items = calloc_(args->capacity, sizeof(Node *));
     map->keySize = args->keySize;

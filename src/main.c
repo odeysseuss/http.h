@@ -1,3 +1,4 @@
+#define ARENA_IMPLEMENTATION
 #define POOL_IMPLEMENTATION
 #define TCP_IMPLEMENTATION
 #define HASHMAP_IMPLEMENTATION
@@ -10,7 +11,7 @@
 
 #define PORT "8000"
 
-void onAccept(const Conn *conn) {
+void onAccept(const TcpConn *conn) {
     char buf[INET6_ADDRSTRLEN];
     fprintf(stdout,
             "[Connected] %s:%d (fd: %d)\n",
@@ -19,7 +20,7 @@ void onAccept(const Conn *conn) {
             conn->fd);
 }
 
-void onClose(const Conn *conn) {
+void onClose(const TcpConn *conn) {
     char buf[INET6_ADDRSTRLEN];
     fprintf(stdout,
             "[Disconnected] %s:%d (fd: %d)\n",
@@ -28,7 +29,7 @@ void onClose(const Conn *conn) {
             conn->fd);
 }
 
-int httpHandler(const Conn *conn) {
+int httpHandler(const TcpConn *conn) {
     if (!conn || conn->fd < 0) {
         return -1;
     }
@@ -57,8 +58,9 @@ int main(void) {
         .onClose = onClose,
         .tcpHandler = httpHandler,
     });
-
-    hashmapPrint(http->mime_types);
+    if (!http) {
+        return -1;
+    }
 
     httpFree(http);
 

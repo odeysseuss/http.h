@@ -8,11 +8,12 @@
 *   - structs/{str.h, hashmap.h}
 * NOTE: To use this library define the following macro in EXACTLY
 * ONE FILE BEFORE inlcuding http.h:
-*   #define HTTP_IMPLEMENTATION
-*   #define TCP_IMPLEMENTATION
+*   #define ARENA_IMPLEMENTATION
 *   #define POOL_IMPLEMENTATION
 *   #define STR_IMPLEMENTATION
 *   #define HASHMAP_IMPLEMENTATION
+*   #define TCP_IMPLEMENTATION
+*   #define HTTP_IMPLEMENTATION
 *   #include "http.h"
 *
 * WARNING: Only accessible in Linux as net/tcp.h is Linux only
@@ -20,13 +21,15 @@
 #ifndef HTTP_H
 #define HTTP_H
 
+#include "arena.h"
 #include "pool.h"
 #include "tcp.h"
 #include "str.h"
 #include "hashmap.h"
-#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -53,7 +56,7 @@ typedef struct {
     /// GET     /index.html  HTTP/1.1\r\n
     /// key: value
     /// { body }
-    const Conn *conn;
+    const TcpConn *conn;
     String req_line;
     HashMap *headers;
     String body;
@@ -64,7 +67,7 @@ typedef struct {
     /// HTTP/1.1     200         OK
     /// key: value
     /// { body }
-    const Conn *conn;
+    const TcpConn *conn;
     String res_line;
     HashMap *headers;
     String body;
@@ -72,26 +75,27 @@ typedef struct {
 
 /// represents an http connection
 typedef struct {
+    const TcpConn *conn;
     HttpRequest *req;
     HttpResponse *res;
 } HttpConn;
 
 typedef struct {
-    Listener *listener;
-    PoolAlloc *http_pool; // connection pool
+    TcpListener *listener;
+    PoolAlloc *http_pool; /// Connection pool
     HashMap *mime_types;
 } HttpServer;
 
 typedef struct {
     char *port;
-    uint16_t pool_size;
-    void (*onAccept)(const Conn *conn);
-    void (*onClose)(const Conn *conn);
-    int (*tcpHandler)(const Conn *conn);
+    size_t pool_size; /// Number of connections
+    void (*onAccept)(const TcpConn *conn);
+    void (*onClose)(const TcpConn *conn);
+    int (*tcpHandler)(const TcpConn *conn);
 } HttpArgs;
 
 HttpServer *httpInit(HttpArgs *args);
-HttpConn *httpConnInit(const Conn *conn);
+HttpConn *httpConnInit(const TcpConn *conn);
 HttpRequest *httpParseReq(HttpConn *ser, const String buf);
 HttpResponse *httpGet(const HttpRequest *req,
                       const char *route,
@@ -156,16 +160,23 @@ HttpServer *httpInit(HttpArgs *args) {
         return NULL;
     }
 
-    uint16_t pool_size = 0;
-    if (args->pool_size) {
-        pool_size = args->pool_size;
-    } else {
-        pool_size = 1024;
-    }
+    HttpServer *server = malloc_(sizeof(HttpServer));
+    size_t pool_size = args->pool_size ? args->pool_size : 1024;
+    server->http_pool = poolInit(sizeof(HttpConn), pool_size);
+    server->mime_types = hashmapNew(&(HashMapArgs){
+        .capacity = INITIAL_MIME_CAPACITY,
+        .keySize = mimeMapKeySize_,
+        .keyCmp = mimeMapKeyCmp_,
+        .print = mapPrint_,
+    });
+    httpMimeMapInit_(server->mime_types);
+    hashmapPrint(server->mime_types);
 
-    Listener *listener = tcpListen(&(ListenerArgs){
+    TcpListener *listener = tcpListen(&(TcpListenerArgs){
         .port = args->port,
         .pool_size = args->pool_size,
+        .arena_size =
+            sizeof(HttpConn) + sizeof(HttpRequest) + sizeof(HttpResponse),
     });
     if (!listener) {
         return NULL;
@@ -178,7 +189,7 @@ HttpServer *httpInit(HttpArgs *args) {
             getPort(&listener->addr));
 
     while (1) {
-        Event *event = tcpPoll(listener);
+        TcpEvent *event = tcpPoll(listener);
         if (!event) {
             break;
         }
@@ -187,7 +198,7 @@ HttpServer *httpInit(HttpArgs *args) {
         for (int i = 0; i < nfds; i++) {
             if (event->events[i].data.fd == listener->fd) {
                 while (1) {
-                    Conn *conn = tcpAccept(listener);
+                    TcpConn *conn = tcpAccept(listener);
                     if (!conn) {
                         break;
                     }
@@ -196,7 +207,7 @@ HttpServer *httpInit(HttpArgs *args) {
                     }
                 }
             } else {
-                Conn *conn = event->events[i].data.ptr;
+                TcpConn *conn = event->events[i].data.ptr;
                 if (tcpHandler(conn, args->tcpHandler) == -1) {
                     fprintf(stderr,
                             "[Error] tcpHandler (%s:%d)\n",
@@ -214,30 +225,18 @@ HttpServer *httpInit(HttpArgs *args) {
         }
     }
 
-    HttpServer *server = malloc_(sizeof(HttpServer));
-    server->http_pool = poolInit(sizeof(HttpConn), pool_size);
-    server->mime_types = hashmapNew(&(HashMapArgs){
-        .capacity = INITIAL_MIME_CAPACITY,
-        .keySize = mimeMapKeySize_,
-        .keyCmp = mimeMapKeyCmp_,
-        .print = mapPrint_,
-    });
-    httpMimeMapInit_(server->mime_types);
-
     return server;
 }
 
-HttpConn *httpConnInit(const Conn *conn) {
+HttpConn *httpConnInit(const TcpConn *conn) {
     if (!conn) {
         return NULL;
     }
 
-    size_t total_size =
-        sizeof(HttpConn) + sizeof(HttpRequest) + sizeof(HttpResponse);
-    HttpConn *server = malloc_(total_size);
-    memset(server, 0, total_size);
-    server->req = (HttpRequest *)(server + 1);
-    server->res = (HttpResponse *)(server->req + 1);
+    HttpConn *server = arenaAlloc(conn->arena, sizeof(HttpConn));
+    server->req = arenaAlloc(conn->arena, sizeof(HttpRequest));
+    server->res = arenaAlloc(conn->arena, sizeof(HttpResponse));
+    server->conn = conn;
     server->req->conn = conn;
     server->res->conn = conn;
     return server;
@@ -299,7 +298,7 @@ void httpConnFree(HttpConn *conn) {
     hashmapFree(conn->res->headers);
     strFree(conn->res->body);
 
-    free_(conn);
+    arenaFree(conn->conn->arena);
 }
 
 void httpFree(HttpServer *server) {
