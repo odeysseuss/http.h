@@ -29,8 +29,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,6 +49,12 @@ typedef enum {
     HTTP_INTERNAL_SERVER_ERROR = 500,
     HTTP_NOT_IMPLEMENTED = 501,
 } HttpStatus;
+
+/// Http methods
+typedef enum {
+    HTTP_GET,
+    HTTP_POST,
+} HttpMethod;
 
 typedef struct {
     /// method     path        version
@@ -92,31 +96,28 @@ typedef struct {
     char *port;
     void (*onAccept)(const TcpConn *conn);
     void (*onClose)(const TcpConn *conn);
-    int (*handler)(const TcpConn *conn);
+    int (*tcpHandler)(const TcpConn *conn);
 } HttpArgs;
 
 HttpServer *httpInit(size_t pool_size);
 int httpLoop(HttpServer *server, HttpArgs *args);
 HttpConn *httpConnInit(const TcpConn *conn);
 HttpRequest *httpParseReq(HttpConn *ser, const String buf);
-void httpGet(HttpConn *conn,
-             const char *route,
-             void (*getHadler)(HttpRequest *req));
-void httpPost(HttpConn *conn,
-              const char *route,
-              void (*postHadler)(HttpRequest *req));
-void httpFileServe(HttpConn *conn, const char *path);
-int httpSendResponse(const HttpResponse *res);
+typedef void (*Route_Handler)(HttpConn *conn);
+void httpGet(HttpConn *conn, const char *route, Route_Handler getHandler);
+void httpPost(HttpConn *conn, const char *route, Route_Handler postHandler);
+void httpFileServ(HttpConn *conn, const char *path);
 void httpConnFree(HttpConn *conn);
 void httpFree(HttpServer *server);
 
 // #ifdef HTTP_IMPLEMENTATION
 
+// Private helpers
 #define INITIAL_REQUEST_HEADERS_CAPACITY 32
 #define INITIAL_RESPONSE_HEADERS_CAPACITY 8
-#define INITIAL_MIME_CAPACITY 16
+#define INITIAL_MIME_CAPACITY 32
 
-// === Headers hashmap helpers ===
+// Headers hashmap helpers
 static size_t mapKeysize_(const void *key) {
     return strLen((String)key);
 }
@@ -133,7 +134,7 @@ static void mapPrint_(const void *key, const void *val) {
     printf("%s: %s\n", (char *)key, (char *)val);
 }
 
-// === Mime hashmap helpers ===
+// Mime hashmap helpers
 static size_t mimeMapKeySize_(const void *key) {
     return strlen(key);
 }
@@ -145,18 +146,24 @@ static int mimeMapKeyCmp_(const void *a, const void *b) {
 static HashMap *httpMimeMapInit_(HashMap *map) {
     hashmapSet(map, ".txt", "text/plain");
     hashmapSet(map, ".html", "text/html");
+    hashmapSet(map, ".htm", "text/html");
     hashmapSet(map, ".css", "text/css");
     hashmapSet(map, ".js", "application/javascript");
     hashmapSet(map, ".json", "application/json");
+    hashmapSet(map, ".xml", "application/xml");
+    hashmapSet(map, ".svg", "image/svg+xml");
     hashmapSet(map, ".png", "image/png");
-    hashmapSet(map, ".svg", "image/svg");
     hashmapSet(map, ".jpg", "image/jpeg");
     hashmapSet(map, ".jpeg", "image/jpeg");
+    hashmapSet(map, ".woff", "font/woff");
+    hashmapSet(map, ".woff2", "font/woff2");
+    hashmapSet(map, ".ttf", "font/ttf");
 
     return map;
 }
 
-// === Http helpers ===
+// === Http API implementation ===
+// Constructors
 HttpServer *httpInit(size_t pool_size) {
     if (pool_size == 0) {
         return NULL;
@@ -177,8 +184,23 @@ HttpServer *httpInit(size_t pool_size) {
     return server;
 }
 
+HttpConn *httpConnInit(const TcpConn *conn) {
+    if (!conn) {
+        return NULL;
+    }
+
+    HttpConn *server = arenaAlloc(conn->arena, sizeof(HttpConn));
+    server->req = arenaAlloc(conn->arena, sizeof(HttpRequest));
+    server->res = arenaAlloc(conn->arena, sizeof(HttpResponse));
+    server->conn = conn;
+    server->req->conn = conn;
+    server->res->conn = conn;
+    return server;
+}
+
+// Server loop
 int httpLoop(HttpServer *server, HttpArgs *args) {
-    if (!server || !args || !args->port || !args->handler) {
+    if (!server || !args || !args->port || !args->tcpHandler) {
         return -1;
     }
 
@@ -218,7 +240,7 @@ int httpLoop(HttpServer *server, HttpArgs *args) {
                 }
             } else {
                 TcpConn *conn = event->events[i].data.ptr;
-                if (tcpHandler(conn, args->handler) == -1) {
+                if (tcpHandler(conn, args->tcpHandler) == -1) {
                     fprintf(stderr,
                             "[Error] tcpHandler (%s:%d)\n",
                             getIPAddr(&conn->addr, buf, INET6_ADDRSTRLEN),
@@ -238,20 +260,7 @@ int httpLoop(HttpServer *server, HttpArgs *args) {
     return 0;
 }
 
-HttpConn *httpConnInit(const TcpConn *conn) {
-    if (!conn) {
-        return NULL;
-    }
-
-    HttpConn *server = arenaAlloc(conn->arena, sizeof(HttpConn));
-    server->req = arenaAlloc(conn->arena, sizeof(HttpRequest));
-    server->res = arenaAlloc(conn->arena, sizeof(HttpResponse));
-    server->conn = conn;
-    server->req->conn = conn;
-    server->res->conn = conn;
-    return server;
-}
-
+// Request Parser
 HttpRequest *httpParseReq(HttpConn *ser, const String buf) {
     if (!ser || !buf) {
         return NULL;
@@ -295,6 +304,7 @@ HttpRequest *httpParseReq(HttpConn *ser, const String buf) {
     return req;
 }
 
+// Destructors
 void httpConnFree(HttpConn *conn) {
     if (!conn) {
         return;

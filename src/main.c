@@ -58,7 +58,7 @@ int main(void) {
                            .port = PORT,
                            .onAccept = onAccept,
                            .onClose = onClose,
-                           .handler = handler,
+                           .tcpHandler = handler,
                        });
 
     if (err == -1) {
