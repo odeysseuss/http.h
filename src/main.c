@@ -29,7 +29,7 @@ void onClose(const TcpConn *conn) {
             conn->fd);
 }
 
-int httpHandler(const TcpConn *conn) {
+int handler(const TcpConn *conn) {
     if (!conn || conn->fd < 0) {
         return -1;
     }
@@ -52,17 +52,20 @@ int httpHandler(const TcpConn *conn) {
 }
 
 int main(void) {
-    HttpServer *http = httpInit(&(HttpArgs){
-        .port = PORT,
-        .onAccept = onAccept,
-        .onClose = onClose,
-        .tcpHandler = httpHandler,
-    });
-    if (!http) {
+    HttpServer *server = httpInit(1024);
+    int err = httpLoop(server,
+                       &(HttpArgs){
+                           .port = PORT,
+                           .onAccept = onAccept,
+                           .onClose = onClose,
+                           .handler = handler,
+                       });
+
+    if (err == -1) {
         return -1;
     }
 
-    httpFree(http);
+    httpFree(server);
 
     return 0;
 }
