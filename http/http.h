@@ -4,10 +4,9 @@
 *
 * DEPENDENCIES:
 *   - net/tcp.h
-*   - mem/pool.h (dependency of tcp.h)
+*   - mem/{arena.h, pool.h} (dependency of tcp.h)
 *   - structs/{str.h, hashmap.h}
-* NOTE: To use this library define the following macro in EXACTLY
-* ONE FILE BEFORE inlcuding http.h:
+* USAGE:
 *   #define ARENA_IMPLEMENTATION
 *   #define POOL_IMPLEMENTATION
 *   #define STR_IMPLEMENTATION
@@ -41,6 +40,7 @@ extern "C" {
 #define free_ free
 
 /// Http status codes
+// ref: [mdn/statuscodes](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status)
 typedef enum {
     HTTP_OK = 200,
     HTTP_BAD_REQUEST = 400,
@@ -52,8 +52,8 @@ typedef enum {
 } HttpStatus;
 
 /// Http methods
+// ref: [mdn/httpmethods](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Methods)
 typedef enum {
-    // ref: [mdn/httpmethods](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Methods)
     HTTP_GET = 0,
     HTTP_HEAD,
     HTTP_OPTIONS,
@@ -83,7 +83,6 @@ typedef struct {
     String route;
     HashMap *headers;
     String body;
-    Router *routes;
     HttpMethod method;
 } HttpRequest;
 
@@ -108,8 +107,9 @@ struct HttpConn {
 typedef struct {
     TcpListener *listener;
     PoolAlloc *http_pool; /// Connection pool
-    size_t pool_size;
     HashMap *mime_types;
+    Router *routes;
+    size_t pool_size;
 } HttpServer;
 
 typedef struct {
@@ -117,12 +117,13 @@ typedef struct {
     void (*onAccept)(const TcpConn *conn);
     void (*onClose)(const TcpConn *conn);
     int (*tcpHandler)(const TcpConn *conn);
+    void (*onHadlerErr)(const TcpConn *conn);
 } HttpArgs;
 
 HttpServer *httpInit(size_t pool_size);
 int httpLoop(HttpServer *server, HttpArgs *args);
 HttpConn *httpConnInit(const TcpConn *conn);
-HttpRequest *httpParseReq(HttpConn *ser, const String buf);
+const HttpRequest *httpParseReq(HttpConn *ser, const String buf);
 void httpGet(HttpConn *conn, const char *route, Route_Handler getHandler);
 void httpPost(HttpConn *conn, const char *route, Route_Handler postHandler);
 void httpFileServ(HttpConn *conn, const char *path);
@@ -162,7 +163,14 @@ static int mimeMapKeyCmp_(const void *a, const void *b) {
     return strcmp(a, b);
 }
 
-static HashMap *httpMimeMapInit_(HashMap *map) {
+static HashMap *httpMimeMapInit_(void) {
+    HashMap *map = hashmapNew(&(HashMapArgs){
+        .capacity = INITIAL_MIME_CAPACITY,
+        .keySize = mimeMapKeySize_,
+        .keyCmp = mimeMapKeyCmp_,
+        .print = mapPrint_,
+    });
+
     hashmapSet(map, ".txt", "text/plain");
     hashmapSet(map, ".html", "text/html");
     hashmapSet(map, ".htm", "text/html");
@@ -206,7 +214,26 @@ static HttpMethod getHttpMethod_(char *method) {
     case 'C':
         return HTTP_CONNECT;
     default:
-        return -1;
+        return 1000;
+    }
+}
+
+static char *getHttpMethodStr_(HttpStatus status) {
+    switch (status) {
+    case HTTP_OK:
+        return "OK";
+    case HTTP_BAD_REQUEST:
+        return "Bad Request";
+    case HTTP_FORBIDDEN:
+        return "Forbidden";
+    case HTTP_NOT_FOUND:
+        return "Not Found";
+    case HTTP_TOO_MANY_REQUESTS:
+        return "Too Many Requests";
+    case HTTP_INTERNAL_SERVER_ERROR:
+        return "Internal Server Error";
+    case HTTP_NOT_IMPLEMENTED:
+        return "Not Implemented";
     }
 }
 
@@ -220,14 +247,9 @@ HttpServer *httpInit(size_t pool_size) {
     HttpServer *server = malloc_(sizeof(HttpServer));
     server->http_pool = poolInit(sizeof(HttpConn), pool_size);
     server->pool_size = pool_size;
-    server->mime_types = hashmapNew(&(HashMapArgs){
-        .capacity = INITIAL_MIME_CAPACITY,
-        .keySize = mimeMapKeySize_,
-        .keyCmp = mimeMapKeyCmp_,
-        .print = mapPrint_,
-    });
-    httpMimeMapInit_(server->mime_types);
-    hashmapPrint(server->mime_types);
+    server->mime_types = httpMimeMapInit_();
+    // hashmapPrint(server->mime_types);
+    server->routes = NULL;
 
     return server;
 }
@@ -289,15 +311,14 @@ int httpLoop(HttpServer *server, HttpArgs *args) {
             } else {
                 TcpConn *conn = event->events[i].data.ptr;
                 if (tcpHandler(conn, args->tcpHandler) == -1) {
-                    fprintf(stderr,
-                            "[Error] tcpHandler (%s:%d)\n",
-                            getIPAddr(&conn->addr, buf, INET6_ADDRSTRLEN),
-                            getPort(&conn->addr));
+                    if (args->onHadlerErr) {
+                        args->onHadlerErr(conn);
+                    }
                 }
 
-                if (event->events[i].events &
-                    (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-                    if (args->onClose) {
+                if (args->onClose) {
+                    if (event->events[i].events &
+                        (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
                         args->onClose(conn);
                     }
                 }
@@ -309,7 +330,7 @@ int httpLoop(HttpServer *server, HttpArgs *args) {
 }
 
 // Request Parser
-HttpRequest *httpParseReq(HttpConn *ser, const String buf) {
+const HttpRequest *httpParseReq(HttpConn *ser, const String buf) {
     if (!ser || !buf) {
         return NULL;
     }
@@ -329,7 +350,7 @@ HttpRequest *httpParseReq(HttpConn *ser, const String buf) {
 
     // initiate route
     char *route_end = strchr(temp + 1, ' ');
-    req->route = strNewLen(temp, route_end - temp);
+    req->route = strNewLen(temp + 1, route_end - temp - 1);
     // just gonna ignore the http version now
 
     // header buffer
@@ -368,7 +389,6 @@ HttpRequest *httpParseReq(HttpConn *ser, const String buf) {
 
     // initiate body and routes
     req->body = strSlice(buf, header_end_i + 4, strLen(buf));
-    req->routes = NULL;
 
     return req;
 }

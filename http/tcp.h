@@ -290,13 +290,7 @@ TcpListener *tcpListen(const TcpListenerArgs *args) {
     }
 
     listener->fd = fd;
-
-    uint16_t backlog = 0;
-    if (args->backlog) {
-        backlog = args->backlog;
-    } else {
-        backlog = SOMAXCONN;
-    }
+    uint16_t backlog = args->backlog ? args->backlog : SOMAXCONN;
 
     if (listen(fd, backlog) == -1) {
         perror("listen");
@@ -311,12 +305,7 @@ TcpListener *tcpListen(const TcpListenerArgs *args) {
         goto clean;
     }
 
-    size_t pool_size = 0;
-    if (args->pool_size) {
-        pool_size = args->pool_size;
-    } else {
-        pool_size = 1024;
-    }
+    size_t pool_size = args->pool_size ? args->pool_size : 1024;
     listener->pool = poolInit(sizeof(TcpConn), pool_size);
 
     if (args->arena_size) {

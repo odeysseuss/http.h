@@ -1,5 +1,5 @@
 cc := clang
-cflags := -std=c11 -Wall -Wextra -pedantic -MMD -MP -D_GNU_SOURCE
+cflags := -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wswitch -Wimplicit-fallthrough -MMD -MP -D_GNU_SOURCE
 incdir := -Ihttp -Iutils
 objdir := build/obj
 

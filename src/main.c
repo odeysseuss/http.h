@@ -1,4 +1,3 @@
-#include <stdio.h>
 #define ARENA_IMPLEMENTATION
 #define POOL_IMPLEMENTATION
 #define TCP_IMPLEMENTATION
@@ -9,6 +8,7 @@
 #include "tcp.h"
 #include "hashmap.h"
 #include "str.h"
+#include <stdio.h>
 
 #define PORT "8000"
 
@@ -45,7 +45,7 @@ int handler(const TcpConn *conn) {
     String req_buf = strNewLen(buf, bytes_recv);
     printf("request: %s\n", req_buf);
     HttpConn *ser = httpConnInit(conn);
-    HttpRequest *req = httpParseReq(ser, req_buf);
+    const HttpRequest *req = httpParseReq(ser, req_buf);
     printf("method: %d\n", req->method);
     printf("route: %s\n", req->route);
     hashmapPrint(req->headers);
@@ -65,7 +65,7 @@ int main(void) {
                        });
 
     if (err == -1) {
-        return -1;
+        __builtin_unreachable();
     }
 
     httpFree(server);
